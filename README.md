@@ -60,12 +60,27 @@ Pairing is done when `multibox status` shows every peer online.
   local machine and saves the fleet file to `~/Drop`; run
   `multibox apply --from-drop` on the others to adopt it.
 
+## Moving windows between machines
+
+A window can't truly migrate between computers (its process lives on one
+machine), but extend-display gets you the working equivalent: the laptop
+shows a **real Hyprland output** of the desktop, so desktop windows move
+onto the laptop's screen by dragging them past that edge — or instantly via
+`multibox send-window left|right` (also a button in the bar widget while
+extend is active). While a side is an extra monitor, lan-mouse's edge for
+that side is paused automatically (the same edge can't both switch input and
+host a screen) and resumes on stop. The VNC stream is **view-only** unless
+you enable "Allow input from laptop screens" in Setup.
+
 ## Omarchy bar widget
 
 The installer adds a bar widget on Omarchy machines: an icon that dims (or
 turns urgent) as peers drop offline, and a popup with per-machine status,
-a clipboard-sync toggle, extend-display toggles (desktop), and a Dropzone
-launcher.
+a clipboard-sync toggle, extend-display + send-window controls (desktop),
+and Dropzone/Setup launchers. **Drag files onto the widget**: dragging over
+the bar icon opens the popup, and dropping files on a machine's row sends
+them to that machine's `~/Drop/incoming` (result arrives as a notification).
+`multibox send <machine> <files...>` does the same from a terminal.
 
 To install **just the widget** on a machine set up by other means:
 

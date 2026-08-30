@@ -47,6 +47,27 @@ BarWidget {
     actTimer.restart()
   }
 
+  function shellQuote(s) {
+    return "'" + String(s).replace(/'/g, "'\\''") + "'"
+  }
+
+  // Send the files behind a QML drop event to a machine; result arrives as a
+  // desktop notification from `multibox send --notify`.
+  function sendDrop(drop, machineName) {
+    if (!drop.hasUrls) return false
+    var cmd = mb + " send --notify " + shellQuote(machineName)
+    var count = 0
+    for (var i = 0; i < drop.urls.length; i++) {
+      var url = String(drop.urls[i])
+      if (url.indexOf("file://") !== 0) continue
+      cmd += " " + shellQuote(decodeURIComponent(url.substring(7)))
+      count++
+    }
+    if (count === 0) return false
+    act(cmd)
+    return true
+  }
+
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
@@ -95,6 +116,15 @@ BarWidget {
     }
   }
 
+  // Dragging files over the bar icon opens the popup so its machine rows
+  // can receive the drop.
+  DropArea {
+    anchors.fill: parent
+    onEntered: function(drag) {
+      if (!popup.open) { root.refresh(); popup.open = true }
+    }
+  }
+
   PopupCard {
     id: popup
     anchorItem: button
@@ -112,31 +142,54 @@ BarWidget {
 
       Repeater {
         model: root.peers
-        delegate: Row {
+        // Each machine row doubles as a file drop target: drag files from a
+        // file manager onto the row to send them to that machine.
+        delegate: Rectangle {
+          id: peerRow
           required property var modelData
-          spacing: Style.spacing.lg
+          width: content.width
           height: Style.spacing.popupRowHeight
+          radius: Style.cornerRadius
+          color: peerDrop.containsDrag
+            ? Style.hoverFillFor(root.fg, Color.accent)
+            : "transparent"
 
-          Rectangle {
-            width: Style.space(9)
-            height: width
-            radius: width / 2
+          Row {
             anchors.verticalCenter: parent.verticalCenter
-            color: modelData.up ? root.okColor : root.badColor
+            x: Style.spacing.sm
+            spacing: Style.spacing.lg
+
+            Rectangle {
+              width: Style.space(9)
+              height: width
+              radius: width / 2
+              anchors.verticalCenter: parent.verticalCenter
+              color: peerRow.modelData.up ? root.okColor : root.badColor
+            }
+            Text {
+              anchors.verticalCenter: parent.verticalCenter
+              text: peerRow.modelData.name
+              color: root.fg
+              font.family: Style.font.family
+              font.pixelSize: Style.font.body
+            }
+            Text {
+              anchors.verticalCenter: parent.verticalCenter
+              text: peerDrop.containsDrag ? "drop to send"
+                : (peerRow.modelData.up ? peerRow.modelData.ip : "offline")
+              color: peerDrop.containsDrag ? Color.accent : Qt.darker(root.fg, 1.55)
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
+            }
           }
-          Text {
-            anchors.verticalCenter: parent.verticalCenter
-            text: modelData.name
-            color: root.fg
-            font.family: Style.font.family
-            font.pixelSize: Style.font.body
-          }
-          Text {
-            anchors.verticalCenter: parent.verticalCenter
-            text: modelData.up ? modelData.ip : "offline"
-            color: Qt.darker(root.fg, 1.55)
-            font.family: Style.font.family
-            font.pixelSize: Style.font.caption
+
+          DropArea {
+            id: peerDrop
+            anchors.fill: parent
+            enabled: peerRow.modelData.up === true
+            onDropped: function(drop) {
+              if (root.sendDrop(drop, peerRow.modelData.name)) drop.accept()
+            }
           }
         }
       }
@@ -174,6 +227,14 @@ BarWidget {
           checked: root.extendLeft
           onToggled: root.act(root.mb + " extend " + (root.extendLeft ? "stop left" : "start left"))
         }
+        Button {
+          anchors.verticalCenter: parent.verticalCenter
+          visible: root.extendLeft
+          text: "Send window"
+          fontSize: Style.font.caption
+          tooltipText: "Move the focused window onto the left laptop screen"
+          onClicked: root.act(root.mb + " send-window left")
+        }
       }
 
       Row {
@@ -190,6 +251,14 @@ BarWidget {
           anchors.verticalCenter: parent.verticalCenter
           checked: root.extendRight
           onToggled: root.act(root.mb + " extend " + (root.extendRight ? "stop right" : "start right"))
+        }
+        Button {
+          anchors.verticalCenter: parent.verticalCenter
+          visible: root.extendRight
+          text: "Send window"
+          fontSize: Style.font.caption
+          tooltipText: "Move the focused window onto the right laptop screen"
+          onClicked: root.act(root.mb + " send-window right")
         }
       }
 

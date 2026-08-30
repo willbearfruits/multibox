@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "multibox",
   "name": "Multibox",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "author": "willbearfruits",
   "license": "MIT",
   "description": "Status and quick actions for a multibox fleet: peer health, clipboard-sync pause, extend-display toggles, and Dropzone.",

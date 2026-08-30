@@ -60,10 +60,12 @@ class Dropzone(Gtk.ApplicationWindow):
                       margin_top=14, margin_bottom=14, margin_start=10, margin_end=10)
         title = Gtk.Label(label=f"→ {name}")
         title.add_css_class("title-3")
-        status = Gtk.Label(label="drop files here")
-        status.add_css_class("dim-label")
+        hint = Gtk.Label(label="drop files here")
+        hint.add_css_class("dim-label")
+        statuses = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         row.append(title)
-        row.append(status)
+        row.append(hint)
+        row.append(statuses)
         frame.set_child(row)
 
         target = Gtk.DropTarget.new(Gdk.FileList, Gdk.DragAction.COPY)
@@ -72,12 +74,18 @@ class Dropzone(Gtk.ApplicationWindow):
             files = [f.get_path() for f in filelist.get_files() if f.get_path()]
             if not files:
                 return False
-            status.set_label(f"sending {len(files)} file(s)…")
-
-            def done(ok, msg):
-                GLib.idle_add(status.set_label, ("✓ " if ok else "✗ ") + msg)
-
+            # one status line per file, so a failure can't be papered over
+            # by a later success finishing after it
             for path in files:
+                label = Gtk.Label(label=f"… {os.path.basename(path)}")
+                label.add_css_class("dim-label")
+                while len(list(statuses)) >= 5:
+                    statuses.remove(statuses.get_first_child())
+                statuses.append(label)
+
+                def done(ok, msg, label=label):
+                    GLib.idle_add(label.set_label, ("✓ " if ok else "✗ ") + msg)
+
                 threading.Thread(target=send_file, args=(ip, path, done),
                                  daemon=True).start()
             return True

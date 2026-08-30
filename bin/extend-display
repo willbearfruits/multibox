@@ -2,7 +2,9 @@
 # extend-display — use a laptop as an extra monitor via a headless Hyprland
 # output streamed with wayvnc over the tailnet.
 #
-#   extend-display start left|right [WxH[@Hz]]   (default 1920x1080@60)
+#   extend-display start left|right [WxH[@Hz]] [--with-input]
+#     (default 1920x1080@60; VNC is view-only unless --with-input is given.
+#      lan-mouse's client for that side is paused while the edge is a monitor)
 #   extend-display stop  [left|right|all]
 #   extend-display status
 #
@@ -16,8 +18,25 @@ mkdir -p "$STATE_DIR"
 
 port_for() { [[ $1 == left ]] && echo 5901 || echo 5902; }
 
+# The same screen edge can't both switch lan-mouse input to the laptop AND
+# host the headless output, so lan-mouse's client for this side is paused
+# while extend-display owns the edge, and resumed on stop.
+lm_client_id() {  # $1=side -> id or empty
+  lan-mouse cli list 2>/dev/null | awk -v side="($1)" '$0 ~ side {sub(/^id /,""); sub(/:.*/,""); print; exit}'
+}
+
+lm_pause() {
+  local id; id=$(lm_client_id "$1")
+  [[ -n $id ]] && lan-mouse cli deactivate "$id" >/dev/null 2>&1 && echo paused
+}
+
+lm_resume() {
+  local id; id=$(lm_client_id "$1")
+  [[ -n $id ]] && lan-mouse cli activate "$id" >/dev/null 2>&1 || true
+}
+
 start() {
-  local side="$1" mode="${2:-1920x1080@60}"
+  local side="$1" mode="${2:-1920x1080@60}" input="${3:-}"
   local res="${mode%@*}" w="${mode%%x*}"
   [[ -f $STATE_DIR/$side ]] && { echo "'$side' already active ($(cat "$STATE_DIR/$side" | head -1))"; exit 1; }
 
@@ -44,28 +63,37 @@ print(str(max(m["x"]+m["width"] for m in ms))+"x0")')
   fi
   hyprctl keyword monitor "$name,$mode,$pos,1" >/dev/null
 
+  # View-only by default: with input enabled, anything on the tailnet that
+  # can reach this port could inject keystrokes into the session.
+  local input_flag="--disable-input"
+  [[ $input == --with-input ]] && input_flag=""
+
   local port; port=$(port_for "$side")
-  wayvnc -S "$STATE_DIR/$side.sock" -o "$name" "$addr" "$port" &>"$STATE_DIR/$side.log" &
+  wayvnc $input_flag -S "$STATE_DIR/$side.sock" -o "$name" "$addr" "$port" &>"$STATE_DIR/$side.log" &
   local pid=$!
-  printf '%s\n%s\n' "$name" "$pid" > "$STATE_DIR/$side"
+  local lm=""; lm=$(lm_pause "$side" || true)
+  printf '%s\n%s\n%s\n' "$name" "$pid" "$lm" > "$STATE_DIR/$side"
   sleep 1
-  kill -0 "$pid" 2>/dev/null || { rm -f "$STATE_DIR/$side"; hyprctl output remove "$name" >/dev/null; echo "wayvnc failed — see $STATE_DIR/$side.log"; exit 1; }
+  kill -0 "$pid" 2>/dev/null || { rm -f "$STATE_DIR/$side"; hyprctl output remove "$name" >/dev/null; lm_resume "$side"; echo "wayvnc failed — see $STATE_DIR/$side.log"; exit 1; }
   echo "'$side' up: output $name ($mode) — laptop: vncviewer -FullScreen $addr:$port"
 }
 
 stop_one() {
   local side="$1"
   [[ -f $STATE_DIR/$side ]] || { echo "'$side' not active"; return; }
-  local name pid; { read -r name; read -r pid; } < "$STATE_DIR/$side"
+  local name pid lm; { read -r name; read -r pid; read -r lm; } < "$STATE_DIR/$side" || true
   kill "$pid" 2>/dev/null || true
   hyprctl output remove "$name" >/dev/null 2>&1 || true
+  [[ $lm == paused ]] && lm_resume "$side"
   rm -f "$STATE_DIR/$side"
   echo "'$side' stopped ($name removed)"
 }
 
 case "${1:-status}" in
-  start) [[ ${2:-} =~ ^(left|right)$ ]] || { echo "usage: extend-display start left|right [WxH@Hz]"; exit 1; }
-         start "$2" "${3:-1920x1080@60}" ;;
+  start) [[ ${2:-} =~ ^(left|right)$ ]] || { echo "usage: extend-display start left|right [WxH@Hz] [--with-input]"; exit 1; }
+         m="${3:-1920x1080@60}"; i="${4:-}"
+         [[ $m == --with-input ]] && { i="--with-input"; m="1920x1080@60"; }
+         start "$2" "$m" "$i" ;;
   stop)  case "${2:-all}" in
            all) stop_one left; stop_one right ;;
            left|right) stop_one "$2" ;;

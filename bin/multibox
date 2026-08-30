@@ -6,6 +6,9 @@
 #   multibox apply [--from-drop]  regenerate this machine's configs from
 #                              machines.json (--from-drop: first pull the fleet
 #                              file a peer's setup window saved to ~/Drop)
+#   multibox send <machine> <files...>  send files to a machine's ~/Drop/incoming
+#   multibox send-window <side>  desktop only: move the focused window onto the
+#                              extra-monitor output of that side (needs extend)
 #   multibox pause|resume      stop/start clipboard sync (clipsync.service)
 #   multibox drop              open the Dropzone window
 #   multibox extend <args>     desktop only: passthrough to extend-display
@@ -43,7 +46,56 @@ self_json=$(jq -e --arg ip "$my_ip" '.machines[] | select(.ip == $ip)' "$CONFIG"
 my_name=$(jq -r .name <<<"$self_json")
 my_role=$(jq -r .role <<<"$self_json")
 
-probe() { timeout 1 bash -c "exec 3<>/dev/tcp/$1/$CLIPSYNC_PORT" 2>/dev/null; }
+probe() {
+  # /ping proves the daemon answers; fall back to a TCP connect for peers
+  # still running an older clipsync
+  curl -sf --max-time 1 "http://$1:$CLIPSYNC_PORT/ping" >/dev/null 2>&1 \
+    || timeout 1 bash -c "exec 3<>/dev/tcp/$1/$CLIPSYNC_PORT" 2>/dev/null
+}
+
+resolve_ip() {  # name or ip -> ip
+  jq -r --arg q "$1" \
+    '.machines[] | select(.name == $q or .ip == $q) | .ip' "$CONFIG" | head -1
+}
+
+send() {
+  local notify=0
+  [ "${1:-}" = --notify ] && { notify=1; shift; }
+  local target="$1"; shift
+  [ $# -ge 1 ] || die "usage: multibox send <machine> <files...>"
+  local ip; ip=$(resolve_ip "$target")
+  [ -n "$ip" ] || die "unknown machine '$target'"
+  local f rc=0
+  for f in "$@"; do
+    [ -f "$f" ] || { echo "skip $f: not a file"; rc=1; continue; }
+    if curl -sf -X POST -H "X-Filename: $(basename "$f")" \
+        --data-binary "@$f" --max-time 600 \
+        "http://$ip:$CLIPSYNC_PORT/file" >/dev/null; then
+      echo "sent $(basename "$f") -> $target"
+    else
+      echo "FAILED $(basename "$f") -> $target"; rc=1
+    fi
+  done
+  if [ "$notify" = 1 ]; then
+    if [ "$rc" = 0 ]; then
+      notify-send -a Multibox "Sent to $target" "$# file(s) → ~/Drop/incoming" 2>/dev/null || true
+    else
+      notify-send -u critical -a Multibox "Send to $target failed" "check: multibox status" 2>/dev/null || true
+    fi
+  fi
+  return $rc
+}
+
+send_window() {
+  [ "$my_role" = desktop ] || die "send-window is desktop-only"
+  local side="${1:-}"
+  [ "$side" = left ] || [ "$side" = right ] || die "usage: multibox send-window left|right"
+  local sd="${XDG_RUNTIME_DIR:-/run/user/$UID}/extend-display"
+  [ -f "$sd/$side" ] || die "extend-display is not active on '$side' — run: multibox extend start $side"
+  local output; output=$(head -1 "$sd/$side")
+  hyprctl dispatch movewindow "mon:$output" >/dev/null \
+    && echo "focused window moved to the $side laptop screen ($output)"
+}
 
 status() {
   local json="${1:-}"
@@ -182,9 +234,10 @@ extend() {
   # `extend start <side>` with no explicit mode uses the per-side resolution
   # from machines.json options (set in the setup window)
   if [ "${1:-}" = start ] && [ -n "${2:-}" ] && [ -z "${3:-}" ]; then
-    local mode
-    mode=$(jq -r --arg s "$2" '.options.extend[$s] // empty' "$CONFIG")
-    exec "$HOME/.local/bin/extend-display" start "$2" ${mode:+"$mode"}
+    local mode input=""
+    mode=$(jq -r --arg s "$2" '.options.extend[$s] // "1920x1080@60"' "$CONFIG")
+    [ "$(jq -r '.options.extend.input // false' "$CONFIG")" = true ] && input="--with-input"
+    exec "$HOME/.local/bin/extend-display" start "$2" "$mode" $input
   fi
   exec "$HOME/.local/bin/extend-display" "$@"
 }
@@ -196,8 +249,10 @@ case "$cmd" in
   pause)        systemctl --user stop clipsync && echo "clipboard sync paused" ;;
   resume)       systemctl --user start clipsync && echo "clipboard sync resumed" ;;
   drop)         setsid -f python3 "$HOME/.local/bin/dropzone.py" >/dev/null 2>&1 ;;
+  send)         shift; send "$@" ;;
+  send-window)  shift; send_window "$@" ;;
   extend)       shift; extend "$@" ;;
   pair)         pair ;;
   pairing-info) pairing_info ;;
-  *)            grep '^#' "$0" | head -16 | sed 's/^# \?//'; exit 1 ;;
+  *)            grep '^#' "$0" | head -20 | sed 's/^# \?//'; exit 1 ;;
 esac
