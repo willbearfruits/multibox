@@ -182,15 +182,33 @@ apply() {
 
   if [ "$my_role" != desktop ]; then
     echo "--- desktop-monitor viewer"
-    local vnc_port desktop_ip
+    local vnc_port desktop_ip h264
     vnc_port=$([ "$my_role" = left ] && echo 5901 || echo 5902)
     desktop_ip=$(jq -r '.machines[] | select(.role == "desktop") | .ip' "$CONFIG")
+    h264=$(jq -r '.options.extend.h264 // false' "$CONFIG")
     mkdir -p ~/.local/bin
-    # Tight encoding at low compression: on a LAN the bottleneck is encode
-    # latency, not bandwidth — stops TigerVNC auto-negotiating itself into
-    # laggier settings.
-    printf '#!/bin/bash\nexec vncviewer -FullScreen -AutoSelect=0 -PreferredEncoding=Tight -CompressLevel=1 -QualityLevel=9 %s:%s\n' \
-      "$desktop_ip" "$vnc_port" > ~/.local/bin/desktop-monitor
+    if [ "$h264" = true ] && [ -x ~/.local/bin/wlvncc ]; then
+      # wlvncc negotiates open-h264 with wayvnc: the desktop GPU encodes
+      # video, this iGPU hardware-decodes it — far smoother than VNC tiles.
+      # No fullscreen flag exists, so the script fullscreens the window.
+      cat > ~/.local/bin/desktop-monitor <<VEOF
+#!/bin/bash
+export LD_LIBRARY_PATH="\$HOME/.local/lib\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
+"\$HOME/.local/bin/wlvncc" -a desktop-monitor -d -e open-h264,tight $desktop_ip $vnc_port &
+pid=\$!
+sleep 1.5
+hyprctl dispatch focuswindow "class:desktop-monitor" >/dev/null 2>&1
+hyprctl dispatch fullscreen 0 >/dev/null 2>&1
+wait \$pid
+VEOF
+    else
+      [ "$h264" = true ] && echo "note: h264 enabled but ~/.local/bin/wlvncc missing — using TigerVNC"
+      # Tight encoding at low compression: on a LAN the bottleneck is encode
+      # latency, not bandwidth — stops TigerVNC auto-negotiating itself into
+      # laggier settings.
+      printf '#!/bin/bash\nexec vncviewer -FullScreen -AutoSelect=0 -PreferredEncoding=Tight -CompressLevel=1 -QualityLevel=9 %s:%s\n' \
+        "$desktop_ip" "$vnc_port" > ~/.local/bin/desktop-monitor
+    fi
     chmod +x ~/.local/bin/desktop-monitor
   fi
 

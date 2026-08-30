@@ -172,6 +172,13 @@ class SetupWindow(Adw.ApplicationWindow):
         self.fps_row.set_value(int(self.options.get("extend", {}).get("fps", 60)))
         group.add(self.fps_row)
 
+        self.h264_row = Adw.SwitchRow(
+            title="H.264 video streaming",
+            subtitle="GPU-encoded video instead of VNC tiles — much smoother motion "
+                     "(needs the wlvncc viewer on the laptops; falls back to VNC without it)")
+        self.h264_row.set_active(bool(self.options.get("extend", {}).get("h264", False)))
+        group.add(self.h264_row)
+
         self.input_row = Adw.SwitchRow(
             title="Allow input from laptop screens",
             subtitle="Lets the VNC viewer send clicks/keys back (off = view-only, safer)")
@@ -376,6 +383,7 @@ class SetupWindow(Adw.ApplicationWindow):
                 extend[side] = mode
         extend["input"] = self.input_row.get_active()
         extend["fps"] = int(self.fps_row.get_value())
+        extend["h264"] = self.h264_row.get_active()
         cfg = {"machines": self.machines, "options": self.options}
         os.makedirs(os.path.dirname(CONFIG), exist_ok=True)
         with open(CONFIG, "w") as f:

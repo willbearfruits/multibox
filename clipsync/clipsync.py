@@ -219,8 +219,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_error(400)
             return
         viewer = os.path.expanduser("~/.local/bin/desktop-monitor")
+        # matches every viewer flavor: the desktop-monitor script itself,
+        # TigerVNC, and wlvncc (h264 mode)
+        viewer_pattern = "desktop-monitor$|vncviewer -FullScreen|[.]local/bin/wlvncc"
         if action == "start" and os.path.exists(viewer):
-            if subprocess.run(["pgrep", "-f", "vncviewer -FullScreen"],
+            if subprocess.run(["pgrep", "-f", viewer_pattern],
                               capture_output=True).returncode != 0:
                 # launch in its own transient unit: the viewer must survive
                 # clipsync restarts (setsid detaches the session but stays in
@@ -235,7 +238,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif action == "stop":
             subprocess.run(["systemctl", "--user", "stop", "desktop-monitor.service"],
                            capture_output=True)
-            subprocess.run(["pkill", "-f", "vncviewer -FullScreen"],
+            subprocess.run(["pkill", "-f", viewer_pattern],
                            capture_output=True)
         else:
             self.send_error(400)
