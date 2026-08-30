@@ -168,8 +168,11 @@ apply() {
     vnc_port=$([ "$my_role" = left ] && echo 5901 || echo 5902)
     desktop_ip=$(jq -r '.machines[] | select(.role == "desktop") | .ip' "$CONFIG")
     mkdir -p ~/.local/bin
-    printf '#!/bin/bash\nexec vncviewer -FullScreen %s:%s\n' "$desktop_ip" "$vnc_port" \
-      > ~/.local/bin/desktop-monitor
+    # Tight encoding at low compression: on a LAN the bottleneck is encode
+    # latency, not bandwidth — stops TigerVNC auto-negotiating itself into
+    # laggier settings.
+    printf '#!/bin/bash\nexec vncviewer -FullScreen -AutoSelect=0 -PreferredEncoding=Tight -CompressLevel=1 -QualityLevel=9 %s:%s\n' \
+      "$desktop_ip" "$vnc_port" > ~/.local/bin/desktop-monitor
     chmod +x ~/.local/bin/desktop-monitor
   fi
 
@@ -243,10 +246,11 @@ extend() {
   case "${1:-}" in
   start)
     [ -n "${2:-}" ] || die "usage: multibox extend start left|right"
-    local mode input=""
+    local mode input="" fps
     mode=$(jq -r --arg s "$2" '.options.extend[$s] // "1920x1080@60"' "$CONFIG")
+    fps=$(jq -r '.options.extend.fps // 60' "$CONFIG")
     [ "$(jq -r '.options.extend.input // false' "$CONFIG")" = true ] && input="--with-input"
-    "$ed" start "$2" "${3:-$mode}" $input
+    "$ed" start "$2" "${3:-$mode}" $input "--fps=$fps"
     # the laptop switches itself into being the extra screen
     viewer_ctl "$2" start
     ;;

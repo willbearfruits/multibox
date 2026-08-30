@@ -58,6 +58,27 @@ def load_config():
         return json.load(f)
 
 
+def local_monitors():
+    """The physical monitors of the machine running this window, left to
+    right, so the desk picture shows the real hardware."""
+    try:
+        out = subprocess.run(["hyprctl", "monitors", "-j"],
+                             capture_output=True, text=True, timeout=3)
+        mons = json.loads(out.stdout)
+        return sorted((m for m in mons if not m["name"].startswith("HEADLESS")),
+                      key=lambda m: m["x"])
+    except Exception:
+        return []
+
+
+def my_tailscale_ip():
+    try:
+        return subprocess.run(["tailscale", "ip", "-4"], capture_output=True,
+                              text=True, timeout=3).stdout.strip()
+    except Exception:
+        return ""
+
+
 class SetupWindow(Adw.ApplicationWindow):
     def __init__(self, app):
         super().__init__(application=app, title="Multibox Setup")
@@ -108,7 +129,7 @@ class SetupWindow(Adw.ApplicationWindow):
         outer.append(desk)
         self.slot_boxes = {}
         desk.append(self.make_slot("left"))
-        desk.append(self.machine_widget(self.desktop["name"], desktop=True))
+        desk.append(self.desktop_widget())
         desk.append(self.make_slot("right"))
 
         # ---- unseated machines ---------------------------------------------
@@ -144,6 +165,13 @@ class SetupWindow(Adw.ApplicationWindow):
             group.add(row)
             self.res_entries[side] = row
 
+        self.fps_row = Adw.SpinRow(
+            title="Stream frame rate",
+            subtitle="Higher is smoother; lower costs less CPU",
+            adjustment=Gtk.Adjustment(lower=24, upper=120, step_increment=6, page_increment=30))
+        self.fps_row.set_value(int(self.options.get("extend", {}).get("fps", 60)))
+        group.add(self.fps_row)
+
         self.input_row = Adw.SwitchRow(
             title="Allow input from laptop screens",
             subtitle="Lets the VNC viewer send clicks/keys back (off = view-only, safer)")
@@ -160,6 +188,46 @@ class SetupWindow(Adw.ApplicationWindow):
         self.refresh_online()
 
     # ---- widgets -----------------------------------------------------------
+    def desktop_widget(self):
+        """The desktop drawn as its real monitor row when this window runs on
+        the desktop itself; a single generic screen elsewhere."""
+        monitors = local_monitors() if my_tailscale_ip() == self.desktop["ip"] else []
+        if not monitors:
+            return self.machine_widget(self.desktop["name"], desktop=True)
+
+        col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2,
+                      halign=Gtk.Align.CENTER)
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6,
+                      halign=Gtk.Align.CENTER, valign=Gtk.Align.END)
+        for m in monitors:
+            shape = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1,
+                            valign=Gtk.Align.CENTER)
+            shape.add_css_class("screen")
+            shape.add_css_class("desktop-screen")
+            # width scaled from the mode so a 4K next to a 1080p reads true
+            w = max(84, min(150, int(m["width"] / 22)))
+            shape.set_size_request(w, int(w * 0.6))
+            mname = Gtk.Label(label=m["name"])
+            mname.add_css_class("screen-name")
+            shape.append(mname)
+            res = Gtk.Label(label=f'{m["width"]}×{m["height"]}')
+            res.add_css_class("screen-ip")
+            shape.append(res)
+            holder = Gtk.Box(orientation=Gtk.Orientation.VERTICAL,
+                             halign=Gtk.Align.CENTER)
+            holder.append(shape)
+            base = Gtk.Box(halign=Gtk.Align.CENTER)
+            base.add_css_class("stand")
+            base.set_size_request(18, 10)
+            holder.append(base)
+            row.append(holder)
+        col.append(row)
+        caption = Gtk.Label(
+            label=f'{self.desktop["name"]} · {len(monitors)} monitors · {self.desktop["ip"]}')
+        caption.add_css_class("screen-ip")
+        col.append(caption)
+        return col
+
     def machine_widget(self, name, desktop=False, draggable=False):
         """A little monitor: screen with name/IP/status dot, plus a stand."""
         machine = next(m for m in self.machines if m["name"] == name)
@@ -307,6 +375,7 @@ class SetupWindow(Adw.ApplicationWindow):
             if mode:
                 extend[side] = mode
         extend["input"] = self.input_row.get_active()
+        extend["fps"] = int(self.fps_row.get_value())
         cfg = {"machines": self.machines, "options": self.options}
         os.makedirs(os.path.dirname(CONFIG), exist_ok=True)
         with open(CONFIG, "w") as f:
