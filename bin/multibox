@@ -1,0 +1,123 @@
+#!/bin/bash
+# multibox — status and control CLI for a multibox fleet.
+#
+#   multibox status [--json]   peer health, clipsync state, extend-display state
+#   multibox pause|resume      stop/start clipboard sync (clipsync.service)
+#   multibox drop              open the Dropzone window
+#   multibox extend <args>     desktop only: passthrough to extend-display
+#   multibox pair              apply peers' pairing files (lan-mouse + syncthing)
+#   multibox pairing-info      write + print this machine's pairing file
+#
+# Machine list lives in ~/.config/multibox/machines.json (see install.sh):
+#   {"machines": [{"name": "...", "ip": "100.x.y.z", "role": "desktop|left|right"}]}
+set -euo pipefail
+
+CONFIG="$HOME/.config/multibox/machines.json"
+PAIR_DIR="$HOME/Drop/multibox-pairing"
+LM_CONFIG="$HOME/.config/lan-mouse/config.toml"
+CLIPSYNC_PORT=46264
+
+die() { echo "multibox: $*" >&2; exit 1; }
+[ -f "$CONFIG" ] || die "no $CONFIG — run install.sh first"
+
+my_ip=$(tailscale ip -4 2>/dev/null) || die "tailscale is not running"
+self_json=$(jq -e --arg ip "$my_ip" '.machines[] | select(.ip == $ip)' "$CONFIG") \
+  || die "own tailscale IP $my_ip not in $CONFIG"
+my_name=$(jq -r .name <<<"$self_json")
+my_role=$(jq -r .role <<<"$self_json")
+
+probe() { timeout 1 bash -c "exec 3<>/dev/tcp/$1/$CLIPSYNC_PORT" 2>/dev/null; }
+
+status() {
+  local json="${1:-}"
+  local clipsync=false extend_left=false extend_right=false
+  systemctl --user is-active --quiet clipsync 2>/dev/null && clipsync=true
+  if [ "$my_role" = desktop ]; then
+    local sd="${XDG_RUNTIME_DIR:-/run/user/$UID}/extend-display"
+    [ -f "$sd/left" ] && extend_left=true
+    [ -f "$sd/right" ] && extend_right=true
+  fi
+  local peers="[]"
+  while IFS=$'\t' read -r name ip role; do
+    local up=false
+    probe "$ip" && up=true
+    peers=$(jq --arg n "$name" --arg i "$ip" --arg r "$role" --argjson u "$up" \
+      '. + [{name: $n, ip: $i, role: $r, up: $u}]' <<<"$peers")
+  done < <(jq -r --arg ip "$my_ip" \
+      '.machines[] | select(.ip != $ip) | [.name, .ip, .role] | @tsv' "$CONFIG")
+  if [ "$json" = "--json" ]; then
+    jq -n --arg self "$my_name" --arg role "$my_role" \
+      --argjson clipsync "$clipsync" --argjson peers "$peers" \
+      --argjson el "$extend_left" --argjson er "$extend_right" \
+      '{self: $self, role: $role, clipsync: $clipsync, peers: $peers,
+        extend: {left: $el, right: $er}}'
+  else
+    echo "$my_name ($my_role) — clipsync: $clipsync"
+    jq -r '.[] | "  \(.name) [\(.role)] \(.ip): \(if .up then "online" else "OFFLINE" end)"' <<<"$peers"
+    [ "$my_role" = desktop ] && echo "  extend-display: left=$extend_left right=$extend_right"
+    return 0
+  fi
+}
+
+pairing_info() {
+  local pem="$HOME/.config/lan-mouse/lan-mouse.pem"
+  for _ in $(seq 1 30); do [ -f "$pem" ] && break; sleep 1; done
+  [ -f "$pem" ] || die "no lan-mouse certificate at $pem (is lan-mouse installed?)"
+  local fp sid
+  fp=$(openssl x509 -in "$pem" -noout -fingerprint -sha256 | sed 's/.*=//;s/://g' | tr 'A-F' 'a-f')
+  sid=$(syncthing cli show system 2>/dev/null | jq -r .myID) || sid=""
+  mkdir -p "$PAIR_DIR"
+  jq -n --arg n "$my_name" --arg i "$my_ip" --arg f "$fp" --arg s "$sid" \
+    '{name: $n, ip: $i, lanmouse_fp: $f, syncthing_id: $s}' > "$PAIR_DIR/$my_name.json"
+  cat "$PAIR_DIR/$my_name.json"
+  # best-effort: hand it to peers directly over the tailnet (they collect it
+  # with `multibox pair`); useless before syncthing pairs, harmless after
+  jq -r --arg ip "$my_ip" '.machines[] | select(.ip != $ip) | .ip' "$CONFIG" |
+  while read -r peer; do
+    tailscale file cp "$PAIR_DIR/$my_name.json" "$peer:" 2>/dev/null \
+      && echo "sent pairing file to $peer" || true
+  done
+}
+
+pair() {
+  mkdir -p "$PAIR_DIR"
+  # collect pairing files peers may have sent via taildrop (needs root or
+  # tailscale operator; quietly skip if neither)
+  sudo -n tailscale file get "$PAIR_DIR" 2>/dev/null \
+    || tailscale file get "$PAIR_DIR" 2>/dev/null || true
+  local changed=0 f name fp sid
+  for f in "$PAIR_DIR"/*.json; do
+    [ -e "$f" ] || { echo "no pairing files in $PAIR_DIR yet"; return 0; }
+    name=$(jq -r .name "$f"); fp=$(jq -r .lanmouse_fp "$f"); sid=$(jq -r .syncthing_id "$f")
+    [ "$name" = "$my_name" ] && continue
+    jq -e --arg n "$name" '.machines[] | select(.name == $n)' "$CONFIG" >/dev/null \
+      || { echo "skipping $f: '$name' is not in $CONFIG"; continue; }
+    if [ -n "$fp" ] && [ -f "$LM_CONFIG" ] && ! grep -q "$fp" "$LM_CONFIG"; then
+      grep -q '^\[authorized_fingerprints\]' "$LM_CONFIG" \
+        || printf '\n[authorized_fingerprints]\n' >> "$LM_CONFIG"
+      sed -i "/^\[authorized_fingerprints\]/a \"$fp\" = \"$name\"" "$LM_CONFIG"
+      echo "lan-mouse: authorized $name"
+      changed=1
+    fi
+    if [ -n "$sid" ] && [ "$sid" != null ]; then
+      syncthing cli config devices add --device-id "$sid" --name "$name" 2>/dev/null \
+        && echo "syncthing: added device $name" || true
+      syncthing cli config folders drop devices add --device-id "$sid" 2>/dev/null \
+        && echo "syncthing: shared Drop with $name" || true
+    fi
+  done
+  [ "$changed" = 1 ] && systemctl --user try-restart lan-mouse 2>/dev/null && echo "lan-mouse restarted"
+  echo "pairing state applied"
+}
+
+case "${1:-status}" in
+  status)       status "${2:-}" ;;
+  pause)        systemctl --user stop clipsync && echo "clipboard sync paused" ;;
+  resume)       systemctl --user start clipsync && echo "clipboard sync resumed" ;;
+  drop)         setsid -f python3 "$HOME/.local/bin/dropzone.py" >/dev/null 2>&1 ;;
+  extend)       [ "$my_role" = desktop ] || die "extend is desktop-only"
+                shift; exec "$HOME/.local/bin/extend-display" "$@" ;;
+  pair)         pair ;;
+  pairing-info) pairing_info ;;
+  *)            grep '^#' "$0" | head -12 | sed 's/^# \?//'; exit 1 ;;
+esac

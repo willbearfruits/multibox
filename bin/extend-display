@@ -1,0 +1,79 @@
+#!/bin/bash
+# extend-display — use a laptop as an extra monitor via a headless Hyprland
+# output streamed with wayvnc over the tailnet.
+#
+#   extend-display start left|right [WxH[@Hz]]   (default 1920x1080@60)
+#   extend-display stop  [left|right|all]
+#   extend-display status
+#
+# On the laptop, view it fullscreen with:
+#   left:  vncviewer -FullScreen <desktop-tailscale-ip>:5901
+#   right: vncviewer -FullScreen <desktop-tailscale-ip>:5902
+set -euo pipefail
+
+STATE_DIR="${XDG_RUNTIME_DIR:-/run/user/$UID}/extend-display"
+mkdir -p "$STATE_DIR"
+
+port_for() { [[ $1 == left ]] && echo 5901 || echo 5902; }
+
+start() {
+  local side="$1" mode="${2:-1920x1080@60}"
+  local res="${mode%@*}" w="${mode%%x*}"
+  [[ -f $STATE_DIR/$side ]] && { echo "'$side' already active ($(cat "$STATE_DIR/$side" | head -1))"; exit 1; }
+
+  local addr; addr=$(tailscale ip -4 2>/dev/null || true)
+  [[ -z $addr ]] && { echo "tailscale is down — refusing to expose VNC"; exit 1; }
+
+  local before after name
+  before=$(hyprctl monitors -j | python3 -c 'import json,sys;print("\n".join(m["name"] for m in json.load(sys.stdin)))')
+  hyprctl output create headless >/dev/null
+  after=$(hyprctl monitors all -j | python3 -c 'import json,sys;print("\n".join(m["name"] for m in json.load(sys.stdin)))')
+  name=$(comm -13 <(sort <<<"$before") <(sort <<<"$after") | head -1)
+  [[ -z $name ]] && { echo "failed to create headless output"; exit 1; }
+
+  # Position outside the physical monitors: left of x=0, or right of the
+  # rightmost edge (computed live so monitor changes don't break it).
+  local pos
+  if [[ $side == left ]]; then
+    pos="-${w}x0"
+  else
+    pos=$(hyprctl monitors -j | python3 -c '
+import json,sys
+ms=[m for m in json.load(sys.stdin) if not m["name"].startswith("HEADLESS")]
+print(str(max(m["x"]+m["width"] for m in ms))+"x0")')
+  fi
+  hyprctl keyword monitor "$name,$mode,$pos,1" >/dev/null
+
+  local port; port=$(port_for "$side")
+  wayvnc -S "$STATE_DIR/$side.sock" -o "$name" "$addr" "$port" &>"$STATE_DIR/$side.log" &
+  local pid=$!
+  printf '%s\n%s\n' "$name" "$pid" > "$STATE_DIR/$side"
+  sleep 1
+  kill -0 "$pid" 2>/dev/null || { rm -f "$STATE_DIR/$side"; hyprctl output remove "$name" >/dev/null; echo "wayvnc failed — see $STATE_DIR/$side.log"; exit 1; }
+  echo "'$side' up: output $name ($mode) — laptop: vncviewer -FullScreen $addr:$port"
+}
+
+stop_one() {
+  local side="$1"
+  [[ -f $STATE_DIR/$side ]] || { echo "'$side' not active"; return; }
+  local name pid; { read -r name; read -r pid; } < "$STATE_DIR/$side"
+  kill "$pid" 2>/dev/null || true
+  hyprctl output remove "$name" >/dev/null 2>&1 || true
+  rm -f "$STATE_DIR/$side"
+  echo "'$side' stopped ($name removed)"
+}
+
+case "${1:-status}" in
+  start) [[ ${2:-} =~ ^(left|right)$ ]] || { echo "usage: extend-display start left|right [WxH@Hz]"; exit 1; }
+         start "$2" "${3:-1920x1080@60}" ;;
+  stop)  case "${2:-all}" in
+           all) stop_one left; stop_one right ;;
+           left|right) stop_one "$2" ;;
+         esac ;;
+  status) for s in left right; do
+            if [[ -f $STATE_DIR/$s ]]; then
+              echo "$s: ACTIVE ($(head -1 "$STATE_DIR/$s") on port $(port_for "$s"))"
+            else echo "$s: off"; fi
+          done ;;
+  *) grep '^#' "$0" | head -12 | sed 's/^# \?//' ;;
+esac

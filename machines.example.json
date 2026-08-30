@@ -1,0 +1,7 @@
+{
+  "machines": [
+    { "name": "desktop-hostname", "ip": "100.64.0.1", "role": "desktop" },
+    { "name": "left-laptop-hostname", "ip": "100.64.0.2", "role": "left" },
+    { "name": "right-laptop-hostname", "ip": "100.64.0.3", "role": "right" }
+  ]
+}

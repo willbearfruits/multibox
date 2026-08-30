@@ -1,0 +1,220 @@
+#!/usr/bin/env python3
+"""clipsync — clipboard sync between machines over the tailnet.
+
+Architecture (one instance per machine):
+  daemon  — HTTP server on the tailscale IP receiving clips from peers,
+            plus a `wl-paste --watch` child that invokes `clipsync push`
+            on every local clipboard change.
+  push    — read the local clipboard (image/png preferred, else text),
+            dedup against the last seen hash, POST to every peer.
+
+Loop prevention: whichever side sets the clipboard records its content hash
+in a state file; the watch event that set triggers is then skipped.
+
+Security: binds only to this machine's tailscale IP and accepts POSTs only
+from configured peer IPs. The tailnet provides encryption + device auth.
+"""
+import hashlib
+import http.server
+import json
+import os
+import subprocess
+import sys
+import time
+import urllib.request
+
+CONFIG = os.path.expanduser("~/.config/clipsync/config.json")
+STATE = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "clipsync.last")
+PORT = 46264
+MAX_BYTES = 32 * 1024 * 1024  # refuse clips larger than 32 MB
+TEXT_MIMES = ("text/plain;charset=utf-8", "text/plain", "UTF8_STRING", "STRING")
+
+
+def load_config():
+    with open(CONFIG) as f:
+        cfg = json.load(f)
+    return cfg["listen_ip"], cfg["peers"]
+
+
+def read_state():
+    try:
+        with open(STATE) as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        return ""
+
+
+def write_state(digest):
+    tmp = STATE + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(digest)
+    os.replace(tmp, STATE)
+
+
+def clip_digest(mime, data):
+    return hashlib.sha256(mime.encode() + b"\0" + data).hexdigest()
+
+
+def read_clipboard():
+    """Return (mime, bytes) for the current clipboard, or (None, None)."""
+    try:
+        types = subprocess.run(
+            ["wl-paste", "--list-types"], capture_output=True, timeout=5
+        ).stdout.decode(errors="replace").split()
+    except subprocess.TimeoutExpired:
+        return None, None
+    mime = None
+    if "image/png" in types:
+        mime = "image/png"
+    else:
+        for t in TEXT_MIMES:
+            if t in types:
+                mime = "text/plain;charset=utf-8"
+                break
+    if mime is None:
+        return None, None
+    proc = subprocess.run(
+        ["wl-paste", "--no-newline", "--type", mime], capture_output=True, timeout=10
+    )
+    if proc.returncode != 0 or not proc.stdout:
+        return None, None
+    return mime, proc.stdout
+
+
+def set_clipboard(mime, data):
+    subprocess.run(["wl-copy", "--type", mime], input=data, timeout=10)
+
+
+def push():
+    _, peers = load_config()
+    mime, data = read_clipboard()
+    if mime is None or len(data) > MAX_BYTES:
+        return
+    digest = clip_digest(mime, data)
+    if digest == read_state():
+        return  # our own set, or already synced
+    write_state(digest)
+    body = json.dumps(
+        {"mime": mime, "data": __import__("base64").b64encode(data).decode()}
+    ).encode()
+    for peer in peers:
+        req = urllib.request.Request(
+            f"http://{peer}:{PORT}/clip", data=body,
+            headers={"Content-Type": "application/json"}, method="POST",
+        )
+        try:
+            urllib.request.urlopen(req, timeout=3)
+        except OSError as e:
+            print(f"push to {peer} failed: {e}", flush=True)
+
+
+INCOMING = os.path.expanduser("~/Drop/incoming")
+MAX_FILE = 8 * 1024 * 1024 * 1024  # 8 GB
+
+
+def unique_path(directory, name):
+    name = os.path.basename(name) or "unnamed"
+    path = os.path.join(directory, name)
+    stem, ext = os.path.splitext(name)
+    n = 1
+    while os.path.exists(path):
+        path = os.path.join(directory, f"{stem} ({n}){ext}")
+        n += 1
+    return path
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    peers = []
+
+    def do_POST(self):
+        if self.client_address[0] not in self.peers:
+            self.send_error(403)
+            return
+        if self.path == "/file":
+            self.recv_file()
+            return
+        if self.path != "/clip":
+            self.send_error(404)
+            return
+        length = int(self.headers.get("Content-Length", 0))
+        if length > MAX_BYTES * 2:
+            self.send_error(413)
+            return
+        try:
+            payload = json.loads(self.rfile.read(length))
+            mime = payload["mime"]
+            data = __import__("base64").b64decode(payload["data"])
+        except (ValueError, KeyError):
+            self.send_error(400)
+            return
+        # record BEFORE setting so the watch event this triggers is skipped
+        write_state(clip_digest(mime, data))
+        set_clipboard(mime, data)
+        self.send_response(204)
+        self.end_headers()
+        print(f"received {mime} ({len(data)} B) from {self.client_address[0]}", flush=True)
+
+    def recv_file(self):
+        """Raw-body file upload: X-Filename header + streamed bytes."""
+        name = self.headers.get("X-Filename", "")
+        length = int(self.headers.get("Content-Length", 0))
+        if not name or length <= 0 or length > MAX_FILE:
+            self.send_error(400)
+            return
+        os.makedirs(INCOMING, exist_ok=True)
+        dest = unique_path(INCOMING, name)
+        tmp = dest + ".part"
+        remaining = length
+        try:
+            with open(tmp, "wb") as f:
+                while remaining > 0:
+                    chunk = self.rfile.read(min(1024 * 1024, remaining))
+                    if not chunk:
+                        raise OSError("short read")
+                    f.write(chunk)
+                    remaining -= len(chunk)
+            os.replace(tmp, dest)
+        except OSError as e:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            print(f"file receive failed: {e}", flush=True)
+            self.send_error(500)
+            return
+        self.send_response(204)
+        self.end_headers()
+        print(f"received file {os.path.basename(dest)} ({length} B)", flush=True)
+        subprocess.Popen(["notify-send", "-a", "Dropzone",
+                          f"File from {self.client_address[0]}",
+                          f"{os.path.basename(dest)} → ~/Drop/incoming"])
+
+    def log_message(self, *_):
+        pass
+
+
+def daemon():
+    listen_ip, peers = load_config()
+    Handler.peers = peers
+    watcher = subprocess.Popen(
+        ["wl-paste", "--watch", sys.executable, os.path.abspath(__file__), "push"]
+    )
+    print(f"clipsync: listening on {listen_ip}:{PORT}, peers: {peers}", flush=True)
+    try:
+        server = http.server.ThreadingHTTPServer((listen_ip, PORT), Handler)
+        server.serve_forever()
+    finally:
+        watcher.terminate()
+
+
+if __name__ == "__main__":
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "daemon"
+    if cmd == "push":
+        push()
+    elif cmd == "daemon":
+        while True:  # survive tailscale IP not being up yet at login
+            try:
+                daemon()
+            except OSError as e:
+                print(f"bind failed ({e}), retrying in 5s", flush=True)
+                time.sleep(5)
