@@ -105,9 +105,10 @@ send_window() {
 
 status() {
   local json="${1:-}"
-  local clipsync=false extend_left=false extend_right=false
+  local clipsync=false extend_left=false extend_right=false kvm=false
   systemctl --user is-active --quiet clipsync 2>/dev/null \
     && [ ! -e "$PAUSE_FLAG" ] && clipsync=true
+  systemctl --user is-active --quiet lan-mouse 2>/dev/null && kvm=true
   if [ "$my_role" = desktop ]; then
     [ -f "$RUNTIME/extend-display/left" ] && extend_left=true
     [ -f "$RUNTIME/extend-display/right" ] && extend_right=true
@@ -134,12 +135,12 @@ status() {
   rm -rf "$tmpd"
   if [ "$json" = "--json" ]; then
     jq -n --arg self "$my_name" --arg role "$my_role" \
-      --argjson clipsync "$clipsync" --argjson peers "$peers" \
+      --argjson clipsync "$clipsync" --argjson kvm "$kvm" --argjson peers "$peers" \
       --argjson el "$extend_left" --argjson er "$extend_right" \
-      '{self: $self, role: $role, clipsync: $clipsync, peers: $peers,
+      '{self: $self, role: $role, clipsync: $clipsync, kvm: $kvm, peers: $peers,
         extend: {left: $el, right: $er}}'
   else
-    echo "$my_name ($my_role) — clipsync: $clipsync"
+    echo "$my_name ($my_role) — clipsync: $clipsync, mouse/kb sharing: $kvm"
     jq -r '.[] | "  \(.name) [\(.role)] \(.ip): \(if .up then "online" else "OFFLINE" end)"' <<<"$peers"
     [ "$my_role" = desktop ] && echo "  extend-display: left=$extend_left right=$extend_right"
     return 0
@@ -227,7 +228,15 @@ VEOF
   fi
 
   echo "--- restarting services"
-  systemctl --user try-restart clipsync.service lan-mouse.service 2>/dev/null || true
+  systemctl --user try-restart clipsync.service 2>/dev/null || true
+  # NOT `.options.kvm // true`: jq's // also replaces a stored `false`
+  if [ "$(jq -r '.options.kvm != false' "$CONFIG")" = false ]; then
+    systemctl --user disable --now lan-mouse.service 2>/dev/null || true
+    echo "mouse/keyboard sharing: OFF (options.kvm)"
+  else
+    systemctl --user enable --now lan-mouse.service 2>/dev/null || true
+    systemctl --user try-restart lan-mouse.service 2>/dev/null || true
+  fi
 
   # the restart re-activates every lan-mouse client (activate_on_startup) —
   # re-pause the sides extend-display currently owns, or the same edge gets
@@ -426,10 +435,28 @@ extend() {
   esac
 }
 
+kvm() {
+  case "${1:-}" in
+    on|off) ;;
+    *) die "usage: multibox kvm on|off" ;;
+  esac
+  local want=true; [ "$1" = off ] && want=false
+  jq --argjson v "$want" '.options.kvm = $v' "$CONFIG" > "$CONFIG.tmp" \
+    && mv "$CONFIG.tmp" "$CONFIG"
+  cp "$CONFIG" "$FLEET_DROP" 2>/dev/null || true
+  if [ "$want" = true ]; then
+    systemctl --user enable --now lan-mouse.service && echo "mouse/keyboard sharing ON"
+  else
+    systemctl --user disable --now lan-mouse.service && echo "mouse/keyboard sharing OFF"
+  fi
+  echo "(peers adopt it via: multibox apply --from-drop)"
+}
+
 case "$cmd" in
   status)       status "${2:-}" ;;
   setup)        exec python3 "$HOME/.local/bin/multibox-setup.py" ;;
   apply)        apply ;;
+  kvm)          shift; kvm "$@" ;;
   pause)        touch "$PAUSE_FLAG"
                 echo "clipboard sync paused — file drops, ~/Drop and extend keep working" ;;
   resume)       rm -f "$PAUSE_FLAG"

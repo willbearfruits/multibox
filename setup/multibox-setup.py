@@ -143,6 +143,14 @@ class SetupWindow(Adw.ApplicationWindow):
         outer.append(self.tray)
 
         # ---- options --------------------------------------------------------
+        input_group = Adw.PreferencesGroup(title="Input")
+        outer.append(input_group)
+        self.kvm_row = Adw.SwitchRow(
+            title="Mouse && keyboard sharing",
+            subtitle="Cursor and typing follow the screen edges between machines (lan-mouse)")
+        self.kvm_row.set_active(bool(self.options.get("kvm", True)))
+        input_group.add(self.kvm_row)
+
         group = Adw.PreferencesGroup(title="Extra-monitor (extend-display)")
         outer.append(group)
         self.res_entries = {}
@@ -384,6 +392,7 @@ class SetupWindow(Adw.ApplicationWindow):
         extend["input"] = self.input_row.get_active()
         extend["fps"] = int(self.fps_row.get_value())
         extend["h264"] = self.h264_row.get_active()
+        self.options["kvm"] = self.kvm_row.get_active()
         cfg = {"machines": self.machines, "options": self.options}
         os.makedirs(os.path.dirname(CONFIG), exist_ok=True)
         with open(CONFIG, "w") as f:

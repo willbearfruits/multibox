@@ -25,6 +25,7 @@ BarWidget {
   }
   readonly property bool isDesktop: status && status.role === "desktop"
   readonly property bool clipsyncOn: status && status.clipsync === true
+  readonly property bool kvmOn: status && status.kvm === true
   readonly property bool extendLeft: status && status.extend && status.extend.left === true
   readonly property bool extendRight: status && status.extend && status.extend.right === true
 
@@ -195,6 +196,22 @@ BarWidget {
       }
 
       PanelSeparator {}
+
+      Row {
+        spacing: Style.spacing.lg
+        Text {
+          anchors.verticalCenter: parent.verticalCenter
+          text: "Mouse/KB sharing"
+          color: root.fg
+          font.family: Style.font.family
+          font.pixelSize: Style.font.body
+        }
+        ToggleSwitch {
+          anchors.verticalCenter: parent.verticalCenter
+          checked: root.kvmOn
+          onToggled: root.act(root.mb + " kvm " + (root.kvmOn ? "off" : "on"))
+        }
+      }
 
       Row {
         spacing: Style.spacing.lg
