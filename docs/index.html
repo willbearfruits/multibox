@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>multibox</title>
+<meta name="description" content="Run several Omarchy machines as one desk over a Tailscale tailnet — shared mouse/keyboard, clipboard sync, file drop, extra-monitor laptops.">
+<style>
+  :root {
+    --bg: #0d1017; --panel: #151a24; --edge: #232b3b;
+    --fg: #d8dee9; --dim: #7b8496; --accent: #7aa2f7; --ok: #9ece6a;
+    --mono: "JetBrains Mono", ui-monospace, "Cascadia Code", Menlo, monospace;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--bg); color: var(--fg);
+    font-family: var(--mono); line-height: 1.6;
+  }
+  .wrap { max-width: 920px; margin: 0 auto; padding: 0 24px; }
+
+  header { padding: 72px 0 40px; text-align: center; }
+  h1 { font-size: 2.6rem; letter-spacing: -0.02em; }
+  h1 .accent { color: var(--accent); }
+  .tagline { color: var(--dim); margin-top: 10px; font-size: 1.05rem; }
+
+  /* the desk */
+  .desk { display: flex; align-items: flex-end; justify-content: center; gap: 18px;
+          padding: 44px 0 10px; flex-wrap: wrap; }
+  .machine { text-align: center; }
+  .screen {
+    border: 2px solid var(--edge); border-radius: 8px;
+    background: linear-gradient(160deg, rgba(122,162,247,.22), rgba(21,26,36,.9));
+    display: flex; align-items: center; justify-content: center;
+    color: var(--dim); font-size: .72rem; padding: 6px;
+  }
+  .laptop .screen { width: 130px; height: 82px; border-bottom-width: 8px; }
+  .mon .screen { height: 96px; }
+  .mon .stand { width: 16px; height: 12px; background: var(--edge); margin: 0 auto; }
+  .mon .base { width: 56px; height: 4px; background: var(--edge); margin: 0 auto; border-radius: 2px; }
+  .label { margin-top: 8px; font-size: .75rem; color: var(--dim); }
+  .cursor-path { text-align: center; color: var(--ok); font-size: .8rem; padding-bottom: 34px; }
+
+  section { padding: 34px 0; border-top: 1px solid var(--edge); }
+  h2 { font-size: 1.15rem; color: var(--accent); margin-bottom: 18px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--edge); border-radius: 10px;
+    padding: 16px 18px;
+  }
+  .card b { color: var(--fg); display: block; margin-bottom: 6px; }
+  .card p { color: var(--dim); font-size: .86rem; }
+
+  pre {
+    background: var(--panel); border: 1px solid var(--edge); border-radius: 10px;
+    padding: 18px 20px; overflow-x: auto; font-size: .88rem;
+  }
+  pre .c { color: var(--dim); }
+  pre .p { color: var(--ok); }
+  code { color: var(--accent); }
+
+  ul.plain { list-style: none; }
+  ul.plain li { padding: 4px 0; color: var(--dim); font-size: .9rem; }
+  ul.plain li::before { content: "▸ "; color: var(--accent); }
+
+  footer { padding: 40px 0 60px; text-align: center; color: var(--dim); font-size: .85rem; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .btn {
+    display: inline-block; margin-top: 22px; padding: 10px 22px;
+    border: 1px solid var(--accent); border-radius: 8px; font-size: .95rem;
+  }
+  .btn:hover { background: rgba(122,162,247,.12); text-decoration: none; }
+</style>
+</head>
+<body>
+<header class="wrap">
+  <h1>multi<span class="accent">box</span></h1>
+  <p class="tagline">Several Omarchy machines. One desk. Nothing exposed off your tailnet.</p>
+  <a class="btn" href="https://github.com/willbearfruits/multibox">github.com/willbearfruits/multibox</a>
+</header>
+
+<div class="wrap">
+  <div class="desk">
+    <div class="machine laptop"><div class="screen">laptop</div><div class="label">left seat</div></div>
+    <div class="machine mon"><div class="screen" style="width:96px">1080p</div><div class="stand"></div><div class="base"></div><div class="label">desktop</div></div>
+    <div class="machine mon"><div class="screen" style="width:128px">1440p</div><div class="stand"></div><div class="base"></div><div class="label">desktop</div></div>
+    <div class="machine mon"><div class="screen" style="width:74px">5:4</div><div class="stand"></div><div class="base"></div><div class="label">desktop</div></div>
+    <div class="machine laptop"><div class="screen">laptop</div><div class="label">right seat</div></div>
+  </div>
+  <p class="cursor-path">← one cursor, one clipboard, one file drop, all the way across →</p>
+</div>
+
+<section>
+  <div class="wrap">
+    <h2>What it does</h2>
+    <div class="grid">
+      <div class="card"><b>One mouse &amp; keyboard</b>
+        <p>Shove the cursor off a screen edge and you're typing on the machine seated there (lan-mouse, TLS-fingerprint paired).</p></div>
+      <div class="card"><b>One clipboard</b>
+        <p>Copy anywhere, paste anywhere — text and screenshots. Pause it with one toggle before copying secrets.</p></div>
+      <div class="card"><b>Laptops as extra monitors</b>
+        <p>Toggle a side and that laptop becomes a real Hyprland output: drag windows onto it, GPU-streamed at 60&nbsp;fps, view-only VNC by default.</p></div>
+      <div class="card"><b>Drag &amp; drop files</b>
+        <p>Drop files on a machine's row in the bar widget (or the Dropzone window) and they land in its <code>~/Drop/incoming</code>.</p></div>
+      <div class="card"><b>~/Drop everywhere</b>
+        <p>A syncthing-mirrored folder shared by the whole fleet — drop a file on one machine, it's on all of them.</p></div>
+      <div class="card"><b>Omarchy-native controls</b>
+        <p>A bar widget with live fleet health and quick actions, plus a libadwaita setup window where you drag machines into their real seats.</p></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Install</h2>
+    <pre><span class="c"># on every machine (needs a Tailscale tailnet):</span>
+<span class="p">$</span> git clone https://github.com/willbearfruits/multibox
+<span class="p">$</span> cd multibox &amp;&amp; ./install.sh
+<span class="c"># then, once all machines are installed:</span>
+<span class="p">$</span> multibox pair
+<span class="c"># just the Omarchy bar widget:</span>
+<span class="p">$</span> omarchy plugin add https://github.com/willbearfruits/multibox --enable</pre>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Design</h2>
+    <ul class="plain">
+      <li>Everything binds only to the machine's tailscale IP and rejects non-fleet peers — the LAN sees nothing.</li>
+      <li>One fleet description (<code>machines.json</code>) generates every config; <code>multibox apply</code> keeps machines in agreement.</li>
+      <li>Window "dragging" is honest: windows render on a remote screen (they can't migrate processes) — and it feels like one desktop anyway.</li>
+      <li>~500 lines of Python, bash, and QML. No cloud, no accounts, no daemons you can't read in one sitting.</li>
+    </ul>
+  </div>
+</section>
+
+<footer class="wrap">
+  MIT licensed · built on <a href="https://omarchy.org/">Omarchy</a>, <a href="https://github.com/feschber/lan-mouse">lan-mouse</a>, <a href="https://syncthing.net/">syncthing</a>, <a href="https://tailscale.com/">Tailscale</a>
+</footer>
+</body>
+</html>
