@@ -195,11 +195,22 @@ BarWidget {
 
       PanelSeparator {}
 
-      Button {
-        text: "Open Dropzone"
-        onClicked: {
-          root.act(root.mb + " drop")
-          popup.open = false
+      Row {
+        spacing: Style.spacing.md
+
+        Button {
+          text: "Open Dropzone"
+          onClicked: {
+            root.act(root.mb + " drop")
+            popup.open = false
+          }
+        }
+        Button {
+          text: "Setup…"
+          onClicked: {
+            root.act(root.mb + " setup")
+            popup.open = false
+          }
         }
       }
     }

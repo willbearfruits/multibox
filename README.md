@@ -54,6 +54,11 @@ Pairing is done when `multibox status` shows every peer online.
   Hyprland output — dragging windows past that edge moves them "onto the
   laptop").
 - `multibox status` — who's online, what's running.
+- `multibox setup` (or the **Multibox Setup** launcher app, or **Setup…** in
+  the bar widget) — a window where you drag machines into the seats matching
+  your desk and set per-side extra-monitor resolutions. Applying updates the
+  local machine and saves the fleet file to `~/Drop`; run
+  `multibox apply --from-drop` on the others to adopt it.
 
 ## Omarchy bar widget
 
@@ -86,7 +91,8 @@ the LAN.
 
 ```
 install.sh            interactive installer (run on every machine)
-bin/multibox          fleet CLI: status / pause / resume / drop / extend / pair
+bin/multibox          fleet CLI: status / setup / apply / pause / resume / drop / extend / pair
+setup/multibox-setup.py  GTK4 seat-arrangement + options window
 bin/extend-display    headless Hyprland output + wayvnc (desktop only)
 clipsync/clipsync.py  clipboard sync daemon + file receiver
 dropzone/dropzone.py  GTK4 drag-and-drop sender
