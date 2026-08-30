@@ -229,17 +229,40 @@ pair() {
   echo "pairing state applied"
 }
 
+viewer_ctl() {  # $1=side $2=start|stop — open/close the laptop's fullscreen viewer
+  local ip; ip=$(jq -r --arg r "$1" '.machines[] | select(.role == $r) | .ip' "$CONFIG")
+  [ -n "$ip" ] || return 0
+  curl -sf --max-time 3 -X POST -H 'Content-Type: application/json' \
+    -d "{\"action\": \"$2\"}" "http://$ip:$CLIPSYNC_PORT/monitor" >/dev/null 2>&1 \
+    || echo "note: couldn't reach the $1 laptop to $2 its viewer (launch 'Desktop Monitor' there)"
+}
+
 extend() {
   [ "$my_role" = desktop ] || die "extend is desktop-only"
-  # `extend start <side>` with no explicit mode uses the per-side resolution
-  # from machines.json options (set in the setup window)
-  if [ "${1:-}" = start ] && [ -n "${2:-}" ] && [ -z "${3:-}" ]; then
+  local ed="$HOME/.local/bin/extend-display"
+  case "${1:-}" in
+  start)
+    [ -n "${2:-}" ] || die "usage: multibox extend start left|right"
     local mode input=""
     mode=$(jq -r --arg s "$2" '.options.extend[$s] // "1920x1080@60"' "$CONFIG")
     [ "$(jq -r '.options.extend.input // false' "$CONFIG")" = true ] && input="--with-input"
-    exec "$HOME/.local/bin/extend-display" start "$2" "$mode" $input
-  fi
-  exec "$HOME/.local/bin/extend-display" "$@"
+    "$ed" start "$2" "${3:-$mode}" $input
+    # the laptop switches itself into being the extra screen
+    viewer_ctl "$2" start
+    ;;
+  stop)
+    local sides="${2:-all}"
+    [ "$sides" = all ] && sides="left right"
+    local s
+    for s in $sides; do
+      "$ed" stop "$s"
+      viewer_ctl "$s" stop
+    done
+    ;;
+  *)
+    exec "$ed" "$@"
+    ;;
+  esac
 }
 
 case "$cmd" in

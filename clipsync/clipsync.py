@@ -154,6 +154,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.path == "/file":
             self.recv_file()
             return
+        if self.path == "/monitor":
+            self.monitor_ctl()
+            return
         if self.path != "/clip":
             self.send_error(404)
             return
@@ -174,6 +177,33 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_response(204)
         self.end_headers()
         print(f"received {mime} ({len(data)} B) from {self.client_address[0]}", flush=True)
+
+    def monitor_ctl(self):
+        """Desktop-triggered extra-monitor viewer control. Fixed actions only
+        (never arbitrary commands): 'start' launches the fullscreen VNC viewer
+        of the desktop's headless output, 'stop' closes it. This is what makes
+        toggling extend on the desktop light up the laptop by itself."""
+        length = int(self.headers.get("Content-Length", 0))
+        try:
+            action = json.loads(self.rfile.read(min(length, 4096)))["action"]
+        except (ValueError, KeyError):
+            self.send_error(400)
+            return
+        viewer = os.path.expanduser("~/.local/bin/desktop-monitor")
+        if action == "start" and os.path.exists(viewer):
+            if subprocess.run(["pgrep", "-f", "vncviewer -FullScreen"],
+                              capture_output=True).returncode != 0:
+                subprocess.Popen(["setsid", "-f", viewer],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        elif action == "stop":
+            subprocess.run(["pkill", "-f", "vncviewer -FullScreen"],
+                           capture_output=True)
+        else:
+            self.send_error(400)
+            return
+        self.send_response(204)
+        self.end_headers()
+        print(f"monitor viewer: {action} (from {self.client_address[0]})", flush=True)
 
     def recv_file(self):
         """Raw-body file upload: X-Filename header + streamed bytes."""
