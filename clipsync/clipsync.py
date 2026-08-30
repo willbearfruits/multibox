@@ -25,7 +25,11 @@ import time
 import urllib.request
 
 CONFIG = os.path.expanduser("~/.config/clipsync/config.json")
-STATE = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "clipsync.last")
+RUNTIME = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+STATE = os.path.join(RUNTIME, "clipsync.last")
+# `multibox pause` touches this: clipboard stops syncing, but /file and
+# /monitor stay up (pausing must not break file drops or extend-display)
+PAUSED = os.path.join(RUNTIME, "clipsync.paused")
 PORT = 46264
 MAX_BYTES = 32 * 1024 * 1024  # refuse clips larger than 32 MB
 TEXT_MIMES = ("text/plain;charset=utf-8", "text/plain", "UTF8_STRING", "STRING")
@@ -34,7 +38,7 @@ TEXT_MIMES = ("text/plain;charset=utf-8", "text/plain", "UTF8_STRING", "STRING")
 def load_config():
     with open(CONFIG) as f:
         cfg = json.load(f)
-    return cfg["listen_ip"], cfg["peers"], cfg.get("names", {})
+    return cfg["listen_ip"], cfg["peers"], cfg.get("names") or {}
 
 
 def read_state():
@@ -62,21 +66,21 @@ def read_clipboard():
         types = subprocess.run(
             ["wl-paste", "--list-types"], capture_output=True, timeout=5
         ).stdout.decode(errors="replace").split()
-    except subprocess.TimeoutExpired:
+        mime = None
+        if "image/png" in types:
+            mime = "image/png"
+        else:
+            for t in TEXT_MIMES:
+                if t in types:
+                    mime = "text/plain;charset=utf-8"
+                    break
+        if mime is None:
+            return None, None
+        proc = subprocess.run(
+            ["wl-paste", "--no-newline", "--type", mime], capture_output=True, timeout=10
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
         return None, None
-    mime = None
-    if "image/png" in types:
-        mime = "image/png"
-    else:
-        for t in TEXT_MIMES:
-            if t in types:
-                mime = "text/plain;charset=utf-8"
-                break
-    if mime is None:
-        return None, None
-    proc = subprocess.run(
-        ["wl-paste", "--no-newline", "--type", mime], capture_output=True, timeout=10
-    )
     if proc.returncode != 0 or not proc.stdout:
         return None, None
     return mime, proc.stdout
@@ -87,6 +91,8 @@ def set_clipboard(mime, data):
 
 
 def push():
+    if os.path.exists(PAUSED):
+        return
     _, peers, _ = load_config()
     mime, data = read_clipboard()
     if mime is None or len(data) > MAX_BYTES:
@@ -119,7 +125,10 @@ MAX_FILE = 8 * 1024 * 1024 * 1024  # 8 GB
 
 
 def unique_path(directory, name):
-    name = os.path.basename(name) or "unnamed"
+    name = os.path.basename(name)[:200]
+    name = "".join(c if c.isprintable() else "_" for c in name)
+    if name in ("", ".", ".."):
+        name = "unnamed"
     path = os.path.join(directory, name)
     stem, ext = os.path.splitext(name)
     n = 1
@@ -132,6 +141,15 @@ def unique_path(directory, name):
 class Handler(http.server.BaseHTTPRequestHandler):
     peers = []
     names = {}
+    timeout = 30  # per-recv socket timeout: a stalled peer can't pin a thread
+
+    def body_length(self, cap):
+        """Content-Length as an int in (0, cap], else None (caller rejects)."""
+        try:
+            length = int(self.headers.get("Content-Length", ""))
+        except ValueError:
+            return None
+        return length if 0 < length <= cap else None
 
     def do_GET(self):
         """Health probe: `multibox status` checks /ping instead of a bare
@@ -160,8 +178,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.path != "/clip":
             self.send_error(404)
             return
-        length = int(self.headers.get("Content-Length", 0))
-        if length > MAX_BYTES * 2:
+        if os.path.exists(PAUSED):
+            # non-2xx so the sender counts it as undelivered and retries on
+            # the next copy instead of considering the clip synced
+            self.send_error(503, "clipboard sync paused here")
+            return
+        length = self.body_length(MAX_BYTES * 2)
+        if length is None:
             self.send_error(413)
             return
         try:
@@ -170,6 +193,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             data = base64.b64decode(payload["data"])
         except (ValueError, KeyError):
             self.send_error(400)
+            return
+        if mime != "image/png" and not mime.startswith("text/plain"):
+            self.send_error(415)
             return
         # record BEFORE setting so the watch event this triggers is skipped
         write_state(clip_digest(mime, data))
@@ -183,9 +209,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         (never arbitrary commands): 'start' launches the fullscreen VNC viewer
         of the desktop's headless output, 'stop' closes it. This is what makes
         toggling extend on the desktop light up the laptop by itself."""
-        length = int(self.headers.get("Content-Length", 0))
+        length = self.body_length(4096)
+        if length is None:
+            self.send_error(400)
+            return
         try:
-            action = json.loads(self.rfile.read(min(length, 4096)))["action"]
+            action = json.loads(self.rfile.read(length))["action"]
         except (ValueError, KeyError):
             self.send_error(400)
             return
@@ -193,9 +222,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if action == "start" and os.path.exists(viewer):
             if subprocess.run(["pgrep", "-f", "vncviewer -FullScreen"],
                               capture_output=True).returncode != 0:
-                subprocess.Popen(["setsid", "-f", viewer],
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                # launch in its own transient unit: the viewer must survive
+                # clipsync restarts (setsid detaches the session but stays in
+                # this service's cgroup, which systemd kills wholesale)
+                if subprocess.run(
+                        ["systemd-run", "--user", "--collect",
+                         "--unit", "desktop-monitor", viewer],
+                        capture_output=True).returncode != 0:
+                    subprocess.Popen(["setsid", "-f", viewer],
+                                     stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.DEVNULL)
         elif action == "stop":
+            subprocess.run(["systemctl", "--user", "stop", "desktop-monitor.service"],
+                           capture_output=True)
             subprocess.run(["pkill", "-f", "vncviewer -FullScreen"],
                            capture_output=True)
         else:
@@ -208,8 +247,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def recv_file(self):
         """Raw-body file upload: X-Filename header + streamed bytes."""
         name = self.headers.get("X-Filename", "")
-        length = int(self.headers.get("Content-Length", 0))
-        if not name or length <= 0 or length > MAX_FILE:
+        length = self.body_length(MAX_FILE)
+        if not name or length is None:
             self.send_error(400)
             return
         os.makedirs(INCOMING, exist_ok=True)
@@ -284,6 +323,8 @@ if __name__ == "__main__":
         while True:  # survive tailscale IP not being up yet at login
             try:
                 daemon()
-            except OSError as e:
-                print(f"bind failed ({e}), retrying in 5s", flush=True)
+            except (OSError, ValueError, KeyError) as e:
+                # OSError: bind failed (tailscale not up yet, port busy)
+                # ValueError/KeyError: broken config — fixable by 'multibox apply'
+                print(f"daemon start failed ({e}), retrying in 5s", flush=True)
                 time.sleep(5)

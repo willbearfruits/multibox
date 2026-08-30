@@ -45,7 +45,8 @@ Pairing is done when `multibox status` shows every peer online.
 - Shove the cursor off a screen edge → you're typing on the machine seated
   there. `LCtrl+LShift+LAlt+RCtrl` releases a stuck cursor.
 - Copy anywhere, paste anywhere. `multibox pause` before copying secrets you
-  want to keep on one machine (`multibox resume` after).
+  want to keep on one machine (`multibox resume` after). Pausing stops only
+  the clipboard — file drops, `~/Drop` and extend-display keep working.
 - Drop a file in `~/Drop` → it's on every machine.
 - Drag files onto a peer's name in **Dropzone** → they land in that machine's
   `~/Drop/incoming` with a notification.
@@ -54,6 +55,9 @@ Pairing is done when `multibox status` shows every peer online.
   Hyprland output — dragging windows past that edge moves them "onto the
   laptop").
 - `multibox status` — who's online, what's running.
+- `multibox doctor` — when something feels off: checks config, services,
+  pairing, lan-mouse clients, peer reachability and extend state, and tells
+  you what to run to fix each failure.
 - `multibox setup` (or the **Multibox Setup** launcher app, or **Setup…** in
   the bar widget) — a window where you drag machines into the seats matching
   your desk and set per-side extra-monitor resolutions. Applying updates the
@@ -106,7 +110,7 @@ the LAN.
 
 ```
 install.sh            interactive installer (run on every machine)
-bin/multibox          fleet CLI: status / setup / apply / pause / resume / drop / extend / pair
+bin/multibox          fleet CLI: status / setup / apply / send / pause / resume / doctor / drop / extend / pair
 setup/multibox-setup.py  GTK4 seat-arrangement + options window
 bin/extend-display    headless Hyprland output + wayvnc (desktop only)
 clipsync/clipsync.py  clipboard sync daemon + file receiver

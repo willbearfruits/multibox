@@ -58,7 +58,7 @@ MY_ROLE=$(jq -r .role <<<"$SELF")
 echo "This machine: $MY_NAME ($MY_ROLE)"
 
 # ---------- packages --------------------------------------------------------
-pkgs=(lan-mouse syncthing wl-clipboard python-gobject gtk4)
+pkgs=(lan-mouse syncthing wl-clipboard python-gobject gtk4 libadwaita)
 [ "$MY_ROLE" = desktop ] && pkgs+=(wayvnc) || pkgs+=(tigervnc)
 missing=()
 for p in "${pkgs[@]}"; do pacman -Q "$p" &>/dev/null || missing+=("$p"); done

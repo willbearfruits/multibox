@@ -26,19 +26,20 @@ def load_peers():
 
 
 def send_file(ip, path, done):
-    size = os.path.getsize(path)
-    req = urllib.request.Request(
-        f"http://{ip}:{PORT}/file",
-        data=open(path, "rb"),
-        headers={
-            "X-Filename": os.path.basename(path),
-            "Content-Length": str(size),
-            "Content-Type": "application/octet-stream",
-        },
-        method="POST",
-    )
     try:
-        urllib.request.urlopen(req, timeout=600)
+        size = os.path.getsize(path)
+        with open(path, "rb") as f:
+            req = urllib.request.Request(
+                f"http://{ip}:{PORT}/file",
+                data=f,
+                headers={
+                    "X-Filename": os.path.basename(path),
+                    "Content-Length": str(size),
+                    "Content-Type": "application/octet-stream",
+                },
+                method="POST",
+            )
+            urllib.request.urlopen(req, timeout=600)
         done(True, os.path.basename(path))
     except OSError as e:
         done(False, f"{os.path.basename(path)}: {e}")

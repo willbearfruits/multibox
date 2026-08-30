@@ -9,7 +9,9 @@
 #   multibox send <machine> <files...>  send files to a machine's ~/Drop/incoming
 #   multibox send-window <side>  desktop only: move the focused window onto the
 #                              extra-monitor output of that side (needs extend)
-#   multibox pause|resume      stop/start clipboard sync (clipsync.service)
+#   multibox pause|resume      pause/resume clipboard sync ONLY (file drops,
+#                              ~/Drop and extend-display keep working)
+#   multibox doctor            health check: config, services, pairing, peers
 #   multibox drop              open the Dropzone window
 #   multibox extend <args>     desktop only: passthrough to extend-display
 #                              (start <side> uses the resolution from options)
@@ -26,6 +28,10 @@ FLEET_DROP="$HOME/Drop/multibox-fleet.json"
 PAIR_DIR="$HOME/Drop/multibox-pairing"
 LM_CONFIG="$HOME/.config/lan-mouse/config.toml"
 CLIPSYNC_PORT=46264
+RUNTIME="${XDG_RUNTIME_DIR:-/run/user/$UID}"
+# clipsync honors this flag: paused = no clipboard push/receive, while the
+# /file and /monitor endpoints stay up (stopping the service would kill those)
+PAUSE_FLAG="$RUNTIME/clipsync.paused"
 
 die() { echo "multibox: $*" >&2; exit 1; }
 
@@ -90,7 +96,7 @@ send_window() {
   [ "$my_role" = desktop ] || die "send-window is desktop-only"
   local side="${1:-}"
   [ "$side" = left ] || [ "$side" = right ] || die "usage: multibox send-window left|right"
-  local sd="${XDG_RUNTIME_DIR:-/run/user/$UID}/extend-display"
+  local sd="$RUNTIME/extend-display"
   [ -f "$sd/$side" ] || die "extend-display is not active on '$side' — run: multibox extend start $side"
   local output; output=$(head -1 "$sd/$side")
   hyprctl dispatch movewindow "mon:$output" >/dev/null \
@@ -100,20 +106,32 @@ send_window() {
 status() {
   local json="${1:-}"
   local clipsync=false extend_left=false extend_right=false
-  systemctl --user is-active --quiet clipsync 2>/dev/null && clipsync=true
+  systemctl --user is-active --quiet clipsync 2>/dev/null \
+    && [ ! -e "$PAUSE_FLAG" ] && clipsync=true
   if [ "$my_role" = desktop ]; then
-    local sd="${XDG_RUNTIME_DIR:-/run/user/$UID}/extend-display"
-    [ -f "$sd/left" ] && extend_left=true
-    [ -f "$sd/right" ] && extend_right=true
+    [ -f "$RUNTIME/extend-display/left" ] && extend_left=true
+    [ -f "$RUNTIME/extend-display/right" ] && extend_right=true
   fi
-  local peers="[]"
-  while IFS=$'\t' read -r name ip role; do
-    local up=false
-    probe "$ip" && up=true
+  # probe peers in parallel: the bar widget polls this every few seconds, and
+  # sequential probes would stack ~2s of timeout per offline machine
+  local rows row name ip role tmpd
+  mapfile -t rows < <(jq -r --arg ip "$my_ip" \
+      '.machines[] | select(.ip != $ip) | [.name, .ip, .role] | @tsv' "$CONFIG")
+  tmpd=$(mktemp -d)
+  for row in "${rows[@]}"; do
+    IFS=$'\t' read -r name ip role <<<"$row"
+    { probe "$ip" && touch "$tmpd/$ip"; } &
+  done
+  wait
+  local peers="[]" up
+  for row in "${rows[@]}"; do
+    IFS=$'\t' read -r name ip role <<<"$row"
+    up=false
+    [ -e "$tmpd/$ip" ] && up=true
     peers=$(jq --arg n "$name" --arg i "$ip" --arg r "$role" --argjson u "$up" \
       '. + [{name: $n, ip: $i, role: $r, up: $u}]' <<<"$peers")
-  done < <(jq -r --arg ip "$my_ip" \
-      '.machines[] | select(.ip != $ip) | [.name, .ip, .role] | @tsv' "$CONFIG")
+  done
+  rm -rf "$tmpd"
   if [ "$json" = "--json" ]; then
     jq -n --arg self "$my_name" --arg role "$my_role" \
       --argjson clipsync "$clipsync" --argjson peers "$peers" \
@@ -178,6 +196,21 @@ apply() {
 
   echo "--- restarting services"
   systemctl --user try-restart clipsync.service lan-mouse.service 2>/dev/null || true
+
+  # the restart re-activates every lan-mouse client (activate_on_startup) —
+  # re-pause the sides extend-display currently owns, or the same edge gets
+  # two owners (input switching AND a headless output)
+  if [ "$my_role" = desktop ]; then
+    local side id
+    for side in left right; do
+      [ -f "$RUNTIME/extend-display/$side" ] || continue
+      sleep 1
+      id=$(lan-mouse cli list 2>/dev/null \
+        | awk -v side="($side)" '$0 ~ side {sub(/^id /,""); sub(/:.*/,""); print; exit}')
+      [ -n "$id" ] && lan-mouse cli deactivate "$id" >/dev/null 2>&1 || true
+      echo "extend '$side' is active — its lan-mouse client stays paused"
+    done
+  fi
   echo "applied on $my_name ($my_role)"
 }
 
@@ -214,6 +247,11 @@ pair() {
     [ "$name" = "$my_name" ] && continue
     jq -e --arg n "$name" '.machines[] | select(.name == $n)' "$CONFIG" >/dev/null \
       || { echo "skipping $f: '$name' is not in $CONFIG"; continue; }
+    # these strings get spliced into the lan-mouse config / syncthing CLI —
+    # accept only the exact shapes a healthy pairing file can contain
+    [[ $name =~ ^[A-Za-z0-9._-]+$ ]] || { echo "skipping $f: unsafe machine name"; continue; }
+    [[ $fp =~ ^[0-9a-f]{64}$ ]] || fp=""
+    [[ $sid =~ ^[A-Z0-9-]+$ ]] || sid=""
     if [ -n "$fp" ] && [ -f "$LM_CONFIG" ] && ! grep -q "$fp" "$LM_CONFIG"; then
       grep -q '^\[authorized_fingerprints\]' "$LM_CONFIG" \
         || printf '\n[authorized_fingerprints]\n' >> "$LM_CONFIG"
@@ -221,7 +259,7 @@ pair() {
       echo "lan-mouse: authorized $name"
       changed=1
     fi
-    if [ -n "$sid" ] && [ "$sid" != null ]; then
+    if [ -n "$sid" ]; then
       syncthing cli config devices add --device-id "$sid" --name "$name" 2>/dev/null \
         && echo "syncthing: added device $name" || true
       syncthing cli config folders drop devices add --device-id "$sid" 2>/dev/null \
@@ -235,9 +273,86 @@ pair() {
 viewer_ctl() {  # $1=side $2=start|stop — open/close the laptop's fullscreen viewer
   local ip; ip=$(jq -r --arg r "$1" '.machines[] | select(.role == $r) | .ip' "$CONFIG")
   [ -n "$ip" ] || return 0
-  curl -sf --max-time 3 -X POST -H 'Content-Type: application/json' \
-    -d "{\"action\": \"$2\"}" "http://$ip:$CLIPSYNC_PORT/monitor" >/dev/null 2>&1 \
-    || echo "note: couldn't reach the $1 laptop to $2 its viewer (launch 'Desktop Monitor' there)"
+  if ! curl -sf --max-time 3 -X POST -H 'Content-Type: application/json' \
+      -d "{\"action\": \"$2\"}" "http://$ip:$CLIPSYNC_PORT/monitor" >/dev/null 2>&1; then
+    if [ "$2" = start ]; then
+      echo "note: couldn't reach the $1 laptop — launch 'Desktop Monitor' there by hand"
+    else
+      echo "note: couldn't reach the $1 laptop to close its viewer"
+    fi
+  fi
+}
+
+# One-shot health check for "something feels off": prints ok/FAIL per item
+# and exits non-zero if anything needs attention.
+doctor() {
+  local rc=0
+  ok()  { echo "  ok    $1"; }
+  bad() { echo "  FAIL  $1"; rc=1; }
+  echo "$my_name ($my_role) — $my_ip"
+
+  echo "config:"
+  if [ "$(jq '[.machines[] | select(.role == "desktop")] | length' "$CONFIG")" = 1 ]; then
+    ok "machines.json has exactly one desktop"
+  else
+    bad "machines.json must have exactly one machine with role 'desktop'"
+  fi
+
+  echo "services:"
+  local s
+  for s in clipsync lan-mouse syncthing; do
+    if systemctl --user is-active --quiet "$s" 2>/dev/null; then
+      ok "$s running"
+    else
+      bad "$s not running — systemctl --user status $s"
+    fi
+  done
+  [ -e "$PAUSE_FLAG" ] && echo "  note  clipboard sync is paused (multibox resume)"
+
+  echo "lan-mouse:"
+  local lm_list
+  lm_list=$(lan-mouse cli list 2>/dev/null || true)
+  # zero clients is the silent failure mode of the old config format:
+  # daemon runs, logs are clean, mouse just never crosses an edge
+  [ -n "$lm_list" ] || bad "no clients listed — mouse won't cross edges (re-run: multibox apply)"
+  if awk '/^\[authorized_fingerprints\]/{f=1;next} /^\[/{f=0} f&&NF{n++} END{exit !n}' \
+      "$LM_CONFIG" 2>/dev/null; then
+    ok "peer fingerprints authorized"
+  else
+    bad "no authorized fingerprints — run 'multibox pair' on every machine"
+  fi
+
+  echo "peers:"
+  local name ip role
+  while IFS=$'\t' read -r name ip role; do
+    if probe "$ip"; then
+      ok "$name ($ip) answers"
+    else
+      bad "$name ($ip) unreachable — installed and on the tailnet?"
+    fi
+    if [ -n "$lm_list" ] && ! grep -qiF "$name" <<<"$lm_list"; then
+      bad "$name missing from lan-mouse clients (re-run: multibox apply)"
+    fi
+  done < <(jq -r --arg ip "$my_ip" \
+      '.machines[] | select(.ip != $ip) | [.name, .ip, .role] | @tsv' "$CONFIG")
+
+  if [ "$my_role" = desktop ] \
+      && { [ -f "$RUNTIME/extend-display/left" ] || [ -f "$RUNTIME/extend-display/right" ]; }; then
+    echo "extend-display:"
+    local side pid
+    for side in left right; do
+      [ -f "$RUNTIME/extend-display/$side" ] || continue
+      pid=$(sed -n 2p "$RUNTIME/extend-display/$side")
+      if kill -0 "$pid" 2>/dev/null; then
+        ok "extend '$side' active (wayvnc pid $pid)"
+      else
+        bad "extend '$side' state is stale, wayvnc died — run: multibox extend stop $side"
+      fi
+    done
+  fi
+
+  if [ "$rc" = 0 ]; then echo "all good"; else echo "problems found"; fi
+  return $rc
 }
 
 extend() {
@@ -246,6 +361,13 @@ extend() {
   case "${1:-}" in
   start)
     [ -n "${2:-}" ] || die "usage: multibox extend start left|right"
+    if [ -f "$RUNTIME/extend-display/$2" ]; then
+      # already extended: don't fail, just make sure the laptop viewer is up
+      # (covers the viewer having been closed on the laptop side)
+      echo "'$2' is already extended — re-triggering the laptop viewer"
+      viewer_ctl "$2" start
+      return 0
+    fi
     local mode input="" fps
     mode=$(jq -r --arg s "$2" '.options.extend[$s] // "1920x1080@60"' "$CONFIG")
     fps=$(jq -r '.options.extend.fps // 60' "$CONFIG")
@@ -273,13 +395,18 @@ case "$cmd" in
   status)       status "${2:-}" ;;
   setup)        exec python3 "$HOME/.local/bin/multibox-setup.py" ;;
   apply)        apply ;;
-  pause)        systemctl --user stop clipsync && echo "clipboard sync paused" ;;
-  resume)       systemctl --user start clipsync && echo "clipboard sync resumed" ;;
+  pause)        touch "$PAUSE_FLAG"
+                echo "clipboard sync paused — file drops, ~/Drop and extend keep working" ;;
+  resume)       rm -f "$PAUSE_FLAG"
+                # also recover from a pre-flag-era pause that stopped the service
+                systemctl --user start clipsync 2>/dev/null || true
+                echo "clipboard sync resumed" ;;
+  doctor)       doctor ;;
   drop)         setsid -f python3 "$HOME/.local/bin/dropzone.py" >/dev/null 2>&1 ;;
   send)         shift; send "$@" ;;
   send-window)  shift; send_window "$@" ;;
   extend)       shift; extend "$@" ;;
   pair)         pair ;;
   pairing-info) pairing_info ;;
-  *)            grep '^#' "$0" | head -20 | sed 's/^# \?//'; exit 1 ;;
+  *)            sed -n '2,/^set -e/ s/^# \{0,1\}//p' "$0"; exit 1 ;;
 esac

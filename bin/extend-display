@@ -45,8 +45,10 @@ start() {
       *)            mode="$a" ;;
     esac
   done
-  local res="${mode%@*}" w="${mode%%x*}"
-  [[ -f $STATE_DIR/$side ]] && { echo "'$side' already active ($(cat "$STATE_DIR/$side" | head -1))"; exit 1; }
+  [[ $mode =~ ^[0-9]+x[0-9]+(@[0-9.]+)?$ ]] \
+    || { echo "bad mode '$mode' — expected WxH or WxH@Hz (e.g. 1920x1080@60)"; exit 1; }
+  local w="${mode%%x*}"
+  [[ -f $STATE_DIR/$side ]] && { echo "'$side' already active ($(head -1 "$STATE_DIR/$side"))"; exit 1; }
 
   local addr; addr=$(tailscale ip -4 2>/dev/null || true)
   [[ -z $addr ]] && { echo "tailscale is down — refusing to expose VNC"; exit 1; }
@@ -114,7 +116,12 @@ case "${1:-status}" in
          esac ;;
   status) for s in left right; do
             if [[ -f $STATE_DIR/$s ]]; then
-              echo "$s: ACTIVE ($(head -1 "$STATE_DIR/$s") on port $(port_for "$s"))"
+              { read -r name; read -r pid; } < "$STATE_DIR/$s" || true
+              if kill -0 "$pid" 2>/dev/null; then
+                echo "$s: ACTIVE ($name on port $(port_for "$s"))"
+              else
+                echo "$s: STALE — wayvnc died (run: extend-display stop $s)"
+              fi
             else echo "$s: off"; fi
           done ;;
   *) grep '^#' "$0" | head -12 | sed 's/^# \?//' ;;
